@@ -1,19 +1,41 @@
 const AWS = require('aws-sdk');
 const sgMail = require('@sendgrid/mail');
-require('dotenv').config();
 
-// Configure SendGrid
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+// Function to fetch secrets dynamically (optional if not using runtime secret fetching)
+const getSecretValue = async (secretName) => {
+  const secretsManager = new AWS.SecretsManager();
+  const secret = await secretsManager.getSecretValue({ SecretId: secretName }).promise();
+  return JSON.parse(secret.SecretString);
+};
 
+// Lambda handler
 exports.handler = async (event) => {
   try {
+    // Optionally fetch secrets dynamically if environment variables are not used
+    if (!process.env.SENDGRID_API_KEY || !process.env.VERIFICATION_LINK_BASE || !process.env.FROM_EMAIL) {
+      const secrets = await getSecretValue(process.env.SECRETS_MANAGER_ARN); // Pass ARN in environment variable
+      process.env.SENDGRID_API_KEY = secrets.SENDGRID_API_KEY;
+      process.env.VERIFICATION_LINK_BASE = secrets.VERIFICATION_LINK_BASE;
+      process.env.FROM_EMAIL = secrets.FROM_EMAIL;
+    }
+
+    // Validate required environment variables
+    const requiredEnvVars = ['SENDGRID_API_KEY', 'VERIFICATION_LINK_BASE', 'FROM_EMAIL'];
+    for (const envVar of requiredEnvVars) {
+      if (!process.env[envVar]) {
+        throw new Error(`Missing required environment variable: ${envVar}`);
+      }
+    }
+
+    // Configure SendGrid
+    sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
     // Parse SNS message
     const snsMessage = JSON.parse(event.Records[0].Sns.Message);
     const { email, token } = snsMessage;
 
-    // Check required environment variables
-    if (!process.env.SENDGRID_API_KEY || !process.env.VERIFICATION_LINK_BASE || !process.env.FROM_EMAIL) {
-      throw new Error("Missing required environment variables.");
+    if (!email || !token) {
+      throw new Error("Invalid SNS message. 'email' and 'token' are required.");
     }
 
     // Construct the verification link
@@ -22,10 +44,10 @@ exports.handler = async (event) => {
     // Send the verification email
     await sendVerificationEmail(email, verificationLink);
 
-    return { statusCode: 200, body: 'Verification email sent successfully.' };
+    return { statusCode: 200, body: JSON.stringify({ message: 'Verification email sent successfully.' }) };
   } catch (error) {
-    console.error("Error in Lambda function:", error.message);
-    return { statusCode: 500, body: 'Failed to send verification email.' };
+    console.error("Error in Lambda function:", error.message, error.stack);
+    return { statusCode: 500, body: JSON.stringify({ message: 'Failed to send verification email.', error: error.message }) };
   }
 };
 
@@ -40,9 +62,10 @@ const sendVerificationEmail = async (email, verificationLink) => {
 
   try {
     await sgMail.send(msg);
-    console.log('Email sent successfully to:', email);
+    console.log('Verification email sent successfully to:', email);
   } catch (error) {
-    console.error('Error sending email:', error.response ? error.response.body : error.message);
+    console.error('Error sending email via SendGrid:', error.response ? error.response.body : error.message);
     throw new Error('Failed to send verification email via SendGrid.');
   }
 };
+
